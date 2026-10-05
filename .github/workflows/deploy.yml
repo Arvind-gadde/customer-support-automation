@@ -1,0 +1,61 @@
+# Build in ACR and roll out a new Container Apps revision.
+#
+# One-time setup (see docs/deployment.md):
+#  - Run infra/scripts/bootstrap.sh to create the Azure resources.
+#  - Create an Entra app registration with a federated credential for this repo
+#    (OIDC: no long-lived secrets in GitHub), grant it AcrPush + Contributor on the RG.
+#  - Repo variables: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#    AZURE_RESOURCE_GROUP, ACR_NAME, CONTAINER_APP_NAME
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never cancel a half-finished rollout
+
+permissions:
+  id-token: write   # OIDC federation with Entra ID
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # add required reviewers in GitHub for a manual gate
+    timeout-minutes: 30
+    env:
+      IMAGE: ${{ vars.ACR_NAME }}.azurecr.io/support-agent:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push in ACR (immutable tag = git SHA)
+        run: |
+          az acr build --registry "${{ vars.ACR_NAME }}" \
+            --image "support-agent:${{ github.sha }}" --file Dockerfile .
+
+      - name: Roll out new revision
+        run: |
+          az containerapp update \
+            --name "${{ vars.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --image "$IMAGE" \
+            --revision-suffix "g${GITHUB_SHA::7}"
+
+      - name: Wait for readiness
+        run: |
+          FQDN=$(az containerapp show -n "${{ vars.CONTAINER_APP_NAME }}" \
+            -g "${{ vars.AZURE_RESOURCE_GROUP }}" --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 30); do
+            curl -fsS "https://$FQDN/health/ready" && exit 0
+            sleep 10
+          done
+          echo "::error::New revision never became ready"; exit 1

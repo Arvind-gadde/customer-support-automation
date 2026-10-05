@@ -1,0 +1,51 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	guard_input(guard_input)
+	blocked_reply(blocked_reply)
+	classify_intent(classify_intent)
+	retrieve(retrieve)
+	grade_documents(grade_documents)
+	rewrite_query(rewrite_query)
+	generate_answer(generate_answer)
+	verify_answer(verify_answer)
+	smalltalk_reply(smalltalk_reply)
+	account_agent(account_agent)
+	review_tool_calls(review_tool_calls)
+	tools(tools)
+	create_ticket(create_ticket)
+	await_human(await_human)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> guard_input;
+	account_agent -.-> __end__;
+	account_agent -.-> create_ticket;
+	account_agent -.-> review_tool_calls;
+	classify_intent -.-> account_agent;
+	classify_intent -.-> create_ticket;
+	classify_intent -.-> retrieve;
+	classify_intent -.-> smalltalk_reply;
+	create_ticket --> await_human;
+	generate_answer --> verify_answer;
+	grade_documents -.-> create_ticket;
+	grade_documents -.-> generate_answer;
+	grade_documents -.-> rewrite_query;
+	guard_input -.-> blocked_reply;
+	guard_input -.-> classify_intent;
+	retrieve --> grade_documents;
+	review_tool_calls -.-> account_agent;
+	review_tool_calls -.-> tools;
+	rewrite_query --> retrieve;
+	tools --> account_agent;
+	verify_answer -.-> __end__;
+	verify_answer -.-> create_ticket;
+	await_human --> __end__;
+	blocked_reply --> __end__;
+	smalltalk_reply --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+

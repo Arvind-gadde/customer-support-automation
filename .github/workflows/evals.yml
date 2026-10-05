@@ -1,0 +1,42 @@
+# Model-behaviour evals against real Azure OpenAI. Manual + nightly, NOT per-PR:
+# they cost tokens and are non-deterministic.
+name: evals
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 20 * * *"   # 02:00 IST
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    environment: evals
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+          enable-cache: true
+      - run: uv sync --frozen
+      - uses: azure/login@v2   # DefaultAzureCredential picks this session up
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Run evals
+        env:
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
+          CHECKPOINTER_BACKEND: memory
+          RETRIEVER_BACKEND: memory
+        run: uv run python -m evals.run_evals --min-pass-rate 0.9
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: evals/results/
