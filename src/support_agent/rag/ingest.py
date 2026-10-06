@@ -24,6 +24,7 @@ from support_agent.persistence.db import create_pool
 from support_agent.persistence.migrations import run_migrations
 from support_agent.rag.chunking import Chunk, chunk_markdown
 from support_agent.rag.retriever import to_pgvector
+from support_agent.rag.semantic_cache import clear_semantic_cache
 
 logger = get_logger(__name__)
 EMBED_BATCH_SIZE = 64
@@ -82,6 +83,9 @@ async def ingest(
             await cur.execute("DELETE FROM kb_chunks WHERE id = ANY(%s)", (list(stale_ids),))
 
     stats = {"total": len(chunks), "embedded": len(changed), "deleted": len(stale_ids)}
+    if changed or stale_ids:
+        # Cached answers were grounded in the OLD knowledge base: drop them all.
+        stats["cache_cleared"] = await clear_semantic_cache(pool)
     logger.info("ingest.completed", **stats)
     return stats
 

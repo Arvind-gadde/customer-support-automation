@@ -1,4 +1,4 @@
-# Model-behaviour evals against real Azure OpenAI. Manual + nightly, NOT per-PR:
+# Model-behaviour evals against the real OpenAI API. Manual + nightly, NOT per-PR:
 # they cost tokens and are non-deterministic.
 name: evals
 
@@ -8,7 +8,6 @@ on:
     - cron: "30 20 * * *"   # 02:00 IST
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -23,17 +22,14 @@ jobs:
           version: "0.11.7"
           enable-cache: true
       - run: uv sync --frozen
-      - uses: azure/login@v2   # DefaultAzureCredential picks this session up
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Run evals
         env:
-          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
-          AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
+          # Use a SEPARATE project key for evals, with its own budget cap.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_EVALS_API_KEY }}
+          OPENAI_CHAT_MODEL: ${{ vars.OPENAI_CHAT_MODEL || 'gpt-4.1-mini' }}
           CHECKPOINTER_BACKEND: memory
           RETRIEVER_BACKEND: memory
+          SEMANTIC_CACHE_ENABLED: "false"
         run: uv run python -m evals.run_evals --min-pass-rate 0.9
       - uses: actions/upload-artifact@v4
         if: always()

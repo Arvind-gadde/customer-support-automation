@@ -1,4 +1,4 @@
-"""Offline evals against REAL Azure OpenAI (not run in the PR pipeline: costs tokens).
+"""Offline evals against the REAL OpenAI API (not run in the PR pipeline: costs tokens).
 
 Unit tests prove the graph's *wiring*; evals measure the *model's behaviour*
 inside it: routing accuracy, answer content, escalation and safety. Run on every
@@ -27,8 +27,11 @@ from support_agent.core.logging import configure_logging
 from support_agent.integrations.orders import InMemoryOrderService
 from support_agent.integrations.ticketing import InMemoryTicketingClient
 from support_agent.llm.factory import build_dependencies
+from support_agent.llm.moderation import NoopModerator
 from support_agent.rag.ingest import load_chunks
+from support_agent.rag.reranker import PassthroughReranker
 from support_agent.rag.retriever import InMemoryRetriever
+from support_agent.rag.semantic_cache import NullSemanticCache
 from support_agent.services.agent_service import AgentService
 from support_agent.services.schemas import ChatRequest
 
@@ -68,6 +71,9 @@ async def run(min_pass_rate: float) -> int:
         settings,
         tools=build_tools(InMemoryOrderService()),
         retriever=InMemoryRetriever(load_chunks(KB)),
+        reranker=PassthroughReranker(),
+        cache=NullSemanticCache(),  # evals must measure the model, never the cache
+        moderator=NoopModerator(),
         ticketing=InMemoryTicketingClient(),
     )
     service = AgentService(build_graph(deps, InMemorySaver()), settings)
@@ -88,7 +94,7 @@ async def run(min_pass_rate: float) -> int:
     pass_rate = sum(r.passed for r in results) / len(results)
     latencies = sorted(r.latency_s for r in results)
     p95 = latencies[min(len(latencies) - 1, int(0.95 * len(latencies)))]
-    print(f"\nprompt_version={PROMPT_VERSION} model={settings.azure_openai_chat_deployment}")
+    print(f"\nprompt_version={PROMPT_VERSION} model={settings.openai_chat_model}")
     print(f"pass_rate={pass_rate:.0%}  p95_latency={p95}s  cases={len(results)}")
 
     out = HERE / "results"

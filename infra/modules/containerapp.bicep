@@ -5,10 +5,11 @@ param tags object
 param isProd bool
 param image string
 param identityId string
-param identityClientId string
 param registryServer string
 param logAnalyticsWorkspaceName string
 param keyVaultUri string
+@description('Key Vault secrets to expose as env vars: [{ name, env }].')
+param keyVaultSecrets array
 @description('Plain (non-secret) environment variables.')
 param env array
 
@@ -34,12 +35,7 @@ resource managedEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 
 // Secrets are Key Vault REFERENCES resolved by the platform via managed identity.
 // Rotating a secret in Key Vault + restarting the revision picks up the new value.
-var kvSecrets = [
-  { name: 'database-url', env: 'DATABASE_URL' }
-  { name: 'client-api-keys', env: 'CLIENT_API_KEYS' }
-  { name: 'staff-api-keys', env: 'STAFF_API_KEYS' }
-]
-
+var kvSecrets = keyVaultSecrets
 var secretEnv = [for s in kvSecrets: { name: s.env, secretRef: s.name }]
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
@@ -85,11 +81,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(isProd ? '1.0' : '0.5')
             memory: isProd ? '2Gi' : '1Gi'
           }
-          env: concat(
-            env,
-            [{ name: 'AZURE_CLIENT_ID', value: identityClientId }], // tells DefaultAzureCredential which MI
-            secretEnv
-          )
+          env: concat(env, secretEnv)
           probes: [
             {
               type: 'Startup'

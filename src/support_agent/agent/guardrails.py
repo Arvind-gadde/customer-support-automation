@@ -1,7 +1,7 @@
 """Cheap, deterministic input guardrails that run BEFORE any LLM call.
 
-These are a first layer, not the whole defence. In Azure, also enable Azure AI
-Content Safety "Prompt Shields" on the OpenAI deployment; and the real security
+These are a first layer, not the whole defence. OpenAI moderation runs next
+(llm/moderation.py), the output guard checks every answer on the way out, and the real security
 boundary is that tools are scoped to the authenticated customer server-side
 (see tools.py) - so even a successful injection cannot read someone else's data.
 """
@@ -41,6 +41,21 @@ def _luhn_valid(digits: str) -> bool:
                 d -= 9
         total += d
     return total % 10 == 0
+
+
+def _shingles(text: str, size: int) -> set[tuple[str, ...]]:
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def leaks_system_prompt(text: str, system_prompts: list[str], window: int = 8) -> bool:
+    """True if the answer reproduces any `window`-word run of a system prompt.
+
+    Eight consecutive words of our own instructions don't appear in a genuine
+    answer by accident, but they do when a model is coaxed into reciting them.
+    """
+    answer = _shingles(text, window)
+    return any(answer & _shingles(prompt, window) for prompt in system_prompts)
 
 
 def redact_pii(text: str) -> str:

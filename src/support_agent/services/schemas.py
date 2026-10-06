@@ -32,6 +32,9 @@ class TurnResult(BaseModel):
     thread_id: str
     status: TurnStatus
     reply: str | None
+    # Id of the assistant message in `reply`, for feedback. None while paused.
+    reply_message_id: str | None = None
+    cached: bool = False
     intent: str | None = None
     ticket_id: str | None = None
     pending: PendingAction | None = None
@@ -55,6 +58,7 @@ class ResumeRequest(BaseModel):
 
 
 class MessageView(BaseModel):
+    message_id: str | None
     role: Literal["customer", "assistant", "human_agent"]
     content: str
 
@@ -65,3 +69,16 @@ class ThreadView(BaseModel):
     status: TurnStatus
     messages: list[MessageView]
     pending: PendingAction | None = None
+
+
+class FeedbackRequest(BaseModel):
+    customer_id: CustomerId
+    message_id: str = Field(min_length=1, max_length=128)
+    rating: Literal["up", "down"]
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class FeedbackResult(BaseModel):
+    thread_id: str
+    message_id: str
+    rating: Literal["up", "down"]

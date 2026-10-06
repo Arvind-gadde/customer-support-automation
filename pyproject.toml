@@ -14,7 +14,6 @@ dependencies = [
     "langchain-openai>=1.6",
     "langgraph-checkpoint-postgres>=3.1",
     "psycopg[binary,pool]>=3.3",
-    "azure-identity>=1.26",
     "azure-monitor-opentelemetry>=1.8",
     "structlog>=26.1",
     "httpx>=0.28",

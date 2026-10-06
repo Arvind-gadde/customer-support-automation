@@ -1,4 +1,4 @@
-# Local stack: API + Postgres (pgvector). Azure OpenAI stays in the cloud.
+# Local stack: API + Postgres (pgvector). LLM calls go to the OpenAI API.
 #   make up      -> start everything
 #   make ingest  -> load data/knowledge_base into pgvector
 services:
@@ -26,9 +26,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # The slim image has no Azure CLI, so `az login` creds can't be used in here.
-    # For compose, set AZURE_OPENAI_API_KEY in .env - or use `make run` on the host,
-    # where DefaultAzureCredential picks up your `az login` session.
+    # OPENAI_API_KEY and the rest come from .env (see .env.example).
 
 volumes:
   pgdata:

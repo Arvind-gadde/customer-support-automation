@@ -37,13 +37,20 @@ async def pool(settings):  # type: ignore[no-untyped-def]
     settings.database_url = SecretStr(DB_URL or "")
     pool = await create_pool(settings)
     async with pool.connection() as conn:
-        await conn.execute("DROP TABLE IF EXISTS kb_chunks, schema_migrations CASCADE")
+        await conn.execute(
+            "DROP TABLE IF EXISTS kb_chunks, semantic_cache, llm_usage, feedback, "
+            "schema_migrations CASCADE"
+        )
     yield pool
     await pool.close()
 
 
 async def test_migrations_are_idempotent(pool) -> None:
-    assert await run_migrations(pool) == ["001_knowledge_base.sql"]
+    assert await run_migrations(pool) == [
+        "001_knowledge_base.sql",
+        "002_semantic_cache.sql",
+        "003_usage_and_feedback.sql",
+    ]
     assert await run_migrations(pool) == []
 
 
@@ -84,3 +91,56 @@ async def test_interrupted_thread_survives_a_process_restart(settings, pool, ret
             ResumeRequest(decision=ApprovalDecision(approved=True, reviewer="priya")),
         )
     assert done.status == TurnStatus.COMPLETED
+
+
+async def test_pg_semantic_cache_threshold_namespace_and_ingest_wipe(pool) -> None:
+    from support_agent.rag.semantic_cache import PgSemanticCache
+
+    await run_migrations(pool)
+    embeddings = HashEmbeddings()
+
+    def cache(namespace: str = "v1:gpt-4.1-mini", ttl: int = 24) -> PgSemanticCache:
+        return PgSemanticCache(pool, embeddings, namespace=namespace, threshold=0.95, ttl_hours=ttl)
+
+    await cache().store("What is the return window?", "10 days.", ["returns.md"])
+    hit = await cache().lookup("what is the RETURN window??")  # same after normalising
+    assert hit is not None
+    assert hit.answer == "10 days."
+    assert hit.similarity > 0.99
+    assert await cache().lookup("Do you ship to Canada?") is None  # below threshold
+    assert await cache("v2:gpt-4.1-mini").lookup("What is the return window?") is None
+
+    async with pool.connection() as conn:  # expire it
+        await conn.execute("UPDATE semantic_cache SET created_at = now() - interval '2 days'")
+    assert await cache().lookup("What is the return window?") is None
+
+    await cache().store("What is the return window?", "10 days.", ["returns.md"])
+    await ingest(pool, embeddings, load_chunks(KB))  # KB changed => cache wiped
+    assert await cache().lookup("What is the return window?") is None
+
+
+async def test_usage_and_feedback_are_persisted(pool) -> None:
+    from decimal import Decimal
+
+    from support_agent.llm.usage import ModelUsage
+    from support_agent.persistence.stores import (
+        FeedbackRecord,
+        PgFeedbackStore,
+        PgUsageStore,
+        UsageRecord,
+    )
+
+    await run_migrations(pool)
+    await PgUsageStore(pool).record(
+        [UsageRecord("t1", "req1", "gpt-4.1-mini", ModelUsage(3, 900, 100, 150), Decimal("0.0006"))]
+    )
+    feedback = PgFeedbackStore(pool)
+    vote = FeedbackRecord("t1", "m1", "cust_123", 1, None, "v1")
+    await feedback.upsert(vote)
+    await feedback.upsert(FeedbackRecord("t1", "m1", "cust_123", -1, "wrong", "v1"))
+
+    async with pool.connection() as conn:
+        usage = await (await conn.execute("SELECT * FROM llm_usage")).fetchone()
+        votes = await (await conn.execute("SELECT rating, comment FROM feedback")).fetchall()
+    assert usage["cost_usd"] == Decimal("0.000600")
+    assert votes == [{"rating": -1, "comment": "wrong"}]

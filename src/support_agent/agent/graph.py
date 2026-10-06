@@ -1,12 +1,16 @@
 """Graph assembly. Read this file first: it IS the architecture.
 
 Branches (rendered diagram: docs/architecture.md):
-  guard_input      -> blocked_reply                     (prompt injection / oversized input)
-  classify_intent  -> faq       : retrieve -> grade -> [rewrite -> retrieve] -> generate -> verify
+  guard_input      -> blocked_reply          (length / injection / moderation)
+  classify_intent  -> faq       : check_cache -> [hit] guard_output
+                                  [miss] retrieve -> rerank -> grade -> [rewrite -> retrieve]
+                                         -> generate -> verify -> guard_output -> store_cache
                    -> account   : account_agent <-> review_tool_calls (HITL) <-> tools
-                   -> smalltalk : smalltalk_reply
+                                  -> guard_output
+                   -> smalltalk : smalltalk_reply -> guard_output
                    -> human     : create_ticket -> await_human (HITL)
-Any branch that cannot answer safely falls through to create_ticket.
+Every customer-facing LLM answer passes guard_output. Any branch that cannot
+answer safely falls through to create_ticket.
 """
 
 from __future__ import annotations
@@ -21,11 +25,13 @@ from langgraph.prebuilt import ToolNode
 from support_agent.agent import edges
 from support_agent.agent.dependencies import AgentDependencies
 from support_agent.agent.nodes.account import make_account_agent, make_review_tool_calls
-from support_agent.agent.nodes.guard import blocked_reply, make_guard_input
+from support_agent.agent.nodes.cache import make_check_cache, make_store_cache
+from support_agent.agent.nodes.guard import blocked_reply, make_guard_input, make_guard_output
 from support_agent.agent.nodes.handoff import await_human, make_create_ticket
 from support_agent.agent.nodes.rag import (
     make_generate_answer,
     make_grade_documents,
+    make_rerank,
     make_retrieve,
     make_rewrite_query,
     make_smalltalk_reply,
@@ -43,8 +49,12 @@ def build_graph(deps: AgentDependencies, checkpointer: BaseCheckpointSaver[Any])
     g.add_node("guard_input", make_guard_input(deps))
     g.add_node("blocked_reply", blocked_reply)
     g.add_node("classify_intent", make_classify_intent(deps))
+    g.add_node("guard_output", make_guard_output(deps))
     # RAG branch
+    g.add_node("check_cache", make_check_cache(deps))
+    g.add_node("store_cache", make_store_cache(deps))
     g.add_node("retrieve", make_retrieve(deps))
+    g.add_node("rerank", make_rerank(deps))
     g.add_node("grade_documents", make_grade_documents(deps))
     g.add_node("rewrite_query", make_rewrite_query(deps))
     g.add_node("generate_answer", make_generate_answer(deps))
@@ -67,12 +77,16 @@ def build_graph(deps: AgentDependencies, checkpointer: BaseCheckpointSaver[Any])
     g.add_edge("blocked_reply", END)
     g.add_conditional_edges("classify_intent", edges.after_classify)
 
-    g.add_edge("retrieve", "grade_documents")
+    g.add_conditional_edges("check_cache", edges.after_cache)
+    g.add_edge("retrieve", "rerank")
+    g.add_edge("rerank", "grade_documents")
     g.add_conditional_edges("grade_documents", edges.after_grade)
     g.add_edge("rewrite_query", "retrieve")
     g.add_edge("generate_answer", "verify_answer")
     g.add_conditional_edges("verify_answer", edges.after_verify)
-    g.add_edge("smalltalk_reply", END)
+    g.add_edge("smalltalk_reply", "guard_output")
+    g.add_conditional_edges("guard_output", edges.after_guard_output)
+    g.add_edge("store_cache", END)
 
     g.add_conditional_edges("account_agent", edges.after_account_agent)
     g.add_edge("tools", "account_agent")

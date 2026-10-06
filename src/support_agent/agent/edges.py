@@ -15,16 +15,20 @@ def after_guard(state: AgentState) -> Literal["blocked_reply", "classify_intent"
 
 def after_classify(
     state: AgentState,
-) -> Literal["retrieve", "account_agent", "smalltalk_reply", "create_ticket"]:
+) -> Literal["check_cache", "account_agent", "smalltalk_reply", "create_ticket"]:
     match state.get("intent"):
         case Intent.FAQ:
-            return "retrieve"
+            return "check_cache"
         case Intent.ACCOUNT:
             return "account_agent"
         case Intent.SMALLTALK:
             return "smalltalk_reply"
         case _:
             return "create_ticket"
+
+
+def after_cache(state: AgentState) -> Literal["guard_output", "retrieve"]:
+    return "guard_output" if state.get("cache_hit") else "retrieve"
 
 
 def after_grade(state: AgentState) -> Literal["generate_answer", "rewrite_query", "create_ticket"]:
@@ -35,16 +39,30 @@ def after_grade(state: AgentState) -> Literal["generate_answer", "rewrite_query"
     return "rewrite_query"
 
 
-def after_verify(state: AgentState) -> Literal["create_ticket", "__end__"]:
-    return "create_ticket" if state.get("handoff_reason") else "__end__"  # == END
+def after_verify(state: AgentState) -> Literal["create_ticket", "guard_output"]:
+    return "create_ticket" if state.get("handoff_reason") else "guard_output"
 
 
 def after_account_agent(
     state: AgentState,
-) -> Literal["review_tool_calls", "create_ticket", "__end__"]:
+) -> Literal["review_tool_calls", "create_ticket", "guard_output"]:
     if state.get("handoff_reason"):
         return "create_ticket"
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and last.tool_calls:
         return "review_tool_calls"
-    return "__end__"  # == END; literal keeps the Literal[] return type honest
+    return "guard_output"
+
+
+def after_guard_output(state: AgentState) -> Literal["create_ticket", "store_cache", "__end__"]:
+    if state.get("handoff_reason"):
+        return "create_ticket"
+    if (
+        state.get("intent") == Intent.FAQ
+        and state.get("cacheable")
+        and not state.get("cache_hit")
+        and not state.get("output_modified")
+        and state.get("documents")
+    ):
+        return "store_cache"
+    return "__end__"  # == END; the literal keeps the Literal[] return type honest

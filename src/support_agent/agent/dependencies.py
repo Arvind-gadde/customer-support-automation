@@ -1,6 +1,6 @@
 """Everything the graph needs, injected at build time.
 
-Nodes depend on Runnables and Protocols, not on AzureChatOpenAI or Postgres.
+Nodes depend on Runnables and Protocols, not on ChatOpenAI or Postgres.
 That single decision is what makes the graph unit-testable with fakes and lets
 us swap models/providers without touching node code.
 """
@@ -21,7 +21,10 @@ from support_agent.agent.schemas import (
 )
 from support_agent.core.config import Settings
 from support_agent.integrations.ticketing import TicketingClient
+from support_agent.llm.moderation import Moderator
+from support_agent.rag.reranker import Reranker
 from support_agent.rag.retriever import Retriever
+from support_agent.rag.semantic_cache import SemanticCache
 
 Messages = list[BaseMessage]
 
@@ -37,4 +40,7 @@ class AgentDependencies:
     account_agent: Runnable[Messages, AIMessage]  # already bound to `tools`
     tools: list[BaseTool]
     retriever: Retriever
+    reranker: Reranker
+    cache: SemanticCache
+    moderator: Moderator
     ticketing: TicketingClient

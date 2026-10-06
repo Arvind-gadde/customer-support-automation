@@ -8,7 +8,14 @@ from support_agent.api.deps import get_agent_service
 from support_agent.core.errors import ForbiddenError
 from support_agent.core.security import Principal, Role, require_roles
 from support_agent.services.agent_service import AgentService
-from support_agent.services.schemas import CustomerId, ResumeRequest, ThreadView, TurnResult
+from support_agent.services.schemas import (
+    CustomerId,
+    FeedbackRequest,
+    FeedbackResult,
+    ResumeRequest,
+    ThreadView,
+    TurnResult,
+)
 
 router = APIRouter(prefix="/v1/threads", tags=["threads"])
 Service = Annotated[AgentService, Depends(get_agent_service)]
@@ -39,3 +46,17 @@ async def resume_thread(
     _: Annotated[Principal, Depends(require_roles(Role.STAFF))],
 ) -> TurnResult:
     return await service.resume(thread_id, body)
+
+
+@router.post(
+    "/{thread_id}/feedback",
+    response_model=FeedbackResult,
+    summary="Customer thumbs up/down on one assistant message (idempotent upsert)",
+)
+async def submit_feedback(
+    thread_id: str,
+    body: FeedbackRequest,
+    service: Service,
+    _: Annotated[Principal, Depends(require_roles(Role.CLIENT, Role.STAFF))],
+) -> FeedbackResult:
+    return await service.feedback(thread_id, body)

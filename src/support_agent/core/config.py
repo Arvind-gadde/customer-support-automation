@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,19 @@ class RetrieverBackend(StrEnum):
     PGVECTOR = "pgvector"
 
 
+class RerankerBackend(StrEnum):
+    NONE = "none"  # keep hybrid-search (RRF) order
+    COHERE = "cohere"
+
+
+class ModelPrice(BaseModel):
+    """USD per 1M tokens."""
+
+    input: float
+    cached_input: float
+    output: float
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -43,19 +56,33 @@ class Settings(BaseSettings):
     client_api_keys: SecretStr = SecretStr("")
     staff_api_keys: SecretStr = SecretStr("")
 
-    # --- Azure OpenAI -------------------------------------------------------
-    azure_openai_endpoint: str = ""
-    azure_openai_api_version: str = "2024-10-21"
-    # None => Entra ID auth (managed identity in Azure, `az login` locally).
-    azure_openai_api_key: SecretStr | None = None
-    azure_openai_chat_deployment: str = "gpt-4.1-mini"
-    azure_openai_fallback_deployment: str | None = None
-    azure_openai_embedding_deployment: str = "text-embedding-3-small"
+    # --- OpenAI -------------------------------------------------------------
+    # Required everywhere except tests (enforced below). Key Vault in Azure.
+    openai_api_key: SecretStr | None = None
+    # Optional: an internal LLM gateway / proxy speaking the OpenAI API.
+    openai_base_url: str | None = None
+    openai_chat_model: str = "gpt-4.1-mini"
+    # Different model (or same model via another gateway) used when the primary
+    # keeps failing after retries.
+    openai_fallback_model: str | None = None
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_moderation_model: str = "omni-moderation-latest"
     embedding_dimensions: int = 1536
     # None for reasoning models that reject the temperature param.
     llm_temperature: float | None = 0.0
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 3
+
+    # USD per 1M tokens, matched by longest model-name prefix ("gpt-4.1-mini"
+    # matches "gpt-4.1-mini-2025-04-14"). Prices change: verify against
+    # https://openai.com/api/pricing and override via MODEL_PRICING (JSON).
+    model_pricing: dict[str, ModelPrice] = Field(
+        default_factory=lambda: {
+            "gpt-4.1-mini": ModelPrice(input=0.40, cached_input=0.10, output=1.60),
+            "gpt-4.1": ModelPrice(input=2.00, cached_input=0.50, output=8.00),
+            "gpt-4o-mini": ModelPrice(input=0.15, cached_input=0.075, output=0.60),
+        }
+    )
 
     # --- Persistence --------------------------------------------------------
     database_url: SecretStr = SecretStr(
@@ -66,6 +93,23 @@ class Settings(BaseSettings):
     checkpointer_backend: CheckpointerBackend = CheckpointerBackend.POSTGRES
     retriever_backend: RetrieverBackend = RetrieverBackend.PGVECTOR
     run_migrations_on_startup: bool = True
+
+    # --- Semantic cache (FAQ answers only) ---------------------------------
+    semantic_cache_enabled: bool = True
+    # Cosine similarity needed to reuse an answer. High on purpose: a wrong
+    # cache hit is a confidently wrong answer.
+    semantic_cache_threshold: float = Field(default=0.95, ge=0.5, le=1.0)
+    semantic_cache_ttl_hours: int = 24
+
+    # --- Reranking --------------------------------------------------------
+    reranker_backend: RerankerBackend = RerankerBackend.NONE
+    cohere_api_key: SecretStr | None = None
+    cohere_rerank_model: str = "rerank-v3.5"
+    rerank_candidates: int = 20  # retrieve this many, rerank down to retrieval_top_k
+
+    # --- Moderation ---------------------------------------------------------
+    # OpenAI moderation on customer input and on every customer-facing answer.
+    enable_moderation: bool = True
 
     # --- Agent behaviour ----------------------------------------------------
     intent_confidence_threshold: float = Field(default=0.6, ge=0, le=1)
@@ -88,8 +132,10 @@ class Settings(BaseSettings):
     applicationinsights_connection_string: SecretStr | None = None
 
     @field_validator(
-        "azure_openai_api_key",
-        "azure_openai_fallback_deployment",
+        "openai_api_key",
+        "openai_base_url",
+        "openai_fallback_model",
+        "cohere_api_key",
         "order_service_base_url",
         "ticketing_base_url",
         "applicationinsights_connection_string",
@@ -99,6 +145,15 @@ class Settings(BaseSettings):
     def _empty_str_is_none(cls, value: object) -> object:
         # `FOO=` in an env file means "unset", not "empty string".
         return None if value == "" else value
+
+    @model_validator(mode="after")
+    def _require_secrets_outside_dev(self) -> Settings:
+        # Fail at boot, not on the first customer message.
+        if self.environment != Environment.TEST and self.openai_api_key is None:
+            raise ValueError("OPENAI_API_KEY is required (set it in .env or Key Vault).")
+        if self.reranker_backend == RerankerBackend.COHERE and self.cohere_api_key is None:
+            raise ValueError("COHERE_API_KEY is required when RERANKER_BACKEND=cohere.")
+        return self
 
     @property
     def is_production(self) -> bool:

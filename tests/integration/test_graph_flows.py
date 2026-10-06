@@ -227,8 +227,24 @@ async def test_llm_outage_becomes_503_not_500(service_factory) -> None:
     from support_agent.core.errors import ServiceUnavailableError
 
     def throttled(_):
-        request = httpx.Request("POST", "https://x.openai.azure.com")
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
         raise openai.RateLimitError("429", response=httpx.Response(429, request=request), body=None)
 
     with pytest.raises(ServiceUnavailableError):
         await service_factory(router=throttled).chat(ask("What is the return window?"))
+
+
+async def test_revoked_api_key_becomes_503(service_factory) -> None:
+    import httpx
+    import openai
+
+    from support_agent.core.errors import ServiceUnavailableError
+
+    def revoked(_):
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        raise openai.AuthenticationError(
+            "401", response=httpx.Response(401, request=request), body=None
+        )
+
+    with pytest.raises(ServiceUnavailableError):
+        await service_factory(router=revoked).chat(ask("What is the return window?"))

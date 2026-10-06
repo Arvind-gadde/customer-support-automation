@@ -10,6 +10,7 @@ import asyncio
 import json
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, StateSnapshot
 
 from support_agent.agent.graph import SupportGraph
+from support_agent.agent.prompts import PROMPT_VERSION
 from support_agent.agent.state import new_turn
 from support_agent.core.config import Settings
 from support_agent.core.errors import (
@@ -29,8 +31,20 @@ from support_agent.core.errors import (
     ServiceUnavailableError,
 )
 from support_agent.core.logging import get_logger
+from support_agent.core.telemetry import set_span_attributes
+from support_agent.llm.usage import UsageTracker, cost_usd
+from support_agent.persistence.stores import (
+    FeedbackRecord,
+    FeedbackStore,
+    InMemoryFeedbackStore,
+    InMemoryUsageStore,
+    UsageRecord,
+    UsageStore,
+)
 from support_agent.services.schemas import (
     ChatRequest,
+    FeedbackRequest,
+    FeedbackResult,
     MessageView,
     PendingAction,
     ResumeRequest,
@@ -50,9 +64,18 @@ _STATUS_BY_INTERRUPT = {
 
 
 class AgentService:
-    def __init__(self, graph: SupportGraph, settings: Settings) -> None:
+    def __init__(
+        self,
+        graph: SupportGraph,
+        settings: Settings,
+        *,
+        usage_store: UsageStore | None = None,
+        feedback_store: FeedbackStore | None = None,
+    ) -> None:
         self._graph = graph
         self._settings = settings
+        self._usage_store = usage_store or InMemoryUsageStore()
+        self._feedback_store = feedback_store or InMemoryFeedbackStore()
         # Serialises turns per thread within this replica. Across replicas, a
         # client must not send concurrent turns for one thread (documented in API).
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -88,9 +111,12 @@ class AgentService:
     ) -> AsyncIterator[str]:
         async with self._locks[thread_id]:
             yield _sse("start", {"thread_id": thread_id})
+            tracker = UsageTracker()
             try:
                 async for chunk, metadata in self._graph.astream(
-                    new_turn(request.message, request.customer_id), config, stream_mode="messages"
+                    new_turn(request.message, request.customer_id),
+                    {**config, "callbacks": [tracker]},
+                    stream_mode="messages",
                 ):
                     if (
                         isinstance(chunk, AIMessageChunk)
@@ -104,6 +130,8 @@ class AgentService:
                 logger.exception("stream.failed")
                 yield _sse("error", {"code": "internal_error", "message": "Something went wrong."})
                 return
+            finally:
+                await self._record_usage(thread_id, tracker)
             yield _sse("final", result.model_dump(mode="json"))
 
     async def resume(self, thread_id: str, request: ResumeRequest) -> TurnResult:
@@ -137,23 +165,96 @@ class AgentService:
             pending=pending,
         )
 
+    async def feedback(self, thread_id: str, request: FeedbackRequest) -> FeedbackResult:
+        """Thumbs up/down on one assistant message. Re-voting overwrites."""
+        snapshot = await self._snapshot_or_404(self._config(thread_id))
+        if snapshot.values["customer_id"] != request.customer_id:
+            raise NotFoundError("Thread not found.")
+        rated = next(
+            (
+                m
+                for m in snapshot.values.get("messages", [])
+                if isinstance(m, AIMessage) and not m.tool_calls and m.id == request.message_id
+            ),
+            None,
+        )
+        if rated is None:
+            raise NotFoundError("Message not found in this thread.")
+        await self._feedback_store.upsert(
+            FeedbackRecord(
+                thread_id=thread_id,
+                message_id=request.message_id,
+                customer_id=request.customer_id,
+                rating=1 if request.rating == "up" else -1,
+                comment=request.comment,
+                prompt_version=PROMPT_VERSION,
+            )
+        )
+        # Online quality signal: dashboards/alerts key on this event.
+        logger.info(
+            "feedback.received",
+            rating=request.rating,
+            source=rated.response_metadata.get("source", "llm"),
+            prompt_version=PROMPT_VERSION,
+        )
+        return FeedbackResult(
+            thread_id=thread_id, message_id=request.message_id, rating=request.rating
+        )
+
     # ----------------------------------------------------------------- helpers
 
-    async def _invoke(self, graph_input: Any, config: RunnableConfig) -> None:
+    async def _record_usage(self, thread_id: str, tracker: UsageTracker) -> None:
+        if not tracker.by_model:
+            return
+        pricing = self._settings.model_pricing
+        request_id = structlog.contextvars.get_contextvars().get("request_id")
+        records = [
+            UsageRecord(thread_id, request_id, model, usage, cost_usd(model, usage, pricing))
+            for model, usage in tracker.by_model.items()
+        ]
+        total_cost = sum((r.cost_usd for r in records if r.cost_usd is not None), Decimal(0))
+        unpriced = [r.model for r in records if r.cost_usd is None]
+        set_span_attributes(
+            **{"llm.total_tokens": tracker.total_tokens, "llm.cost_usd": float(total_cost)}
+        )
+        logger.info(
+            "llm.usage",
+            calls=sum(r.usage.calls for r in records),
+            total_tokens=tracker.total_tokens,
+            cost_usd=str(total_cost),
+            unpriced_models=unpriced or None,
+        )
         try:
-            await self._graph.ainvoke(graph_input, config)
+            await self._usage_store.record(records)
+        except Exception:
+            logger.exception("usage.record_failed")  # analytics never fail a turn
+
+    async def _invoke(self, graph_input: Any, config: RunnableConfig) -> None:
+        tracker = UsageTracker()
+        thread_id = config["configurable"]["thread_id"]
+        try:
+            await self._graph.ainvoke(graph_input, {**config, "callbacks": [tracker]})
         except (
             openai.RateLimitError,
             openai.APIConnectionError,
             openai.APITimeoutError,
             openai.InternalServerError,
         ) as exc:
-            # Retries + fallback deployment are already exhausted at this point.
+            # Retries + fallback model are already exhausted at this point.
             # The checkpoint is intact, so the client can simply retry the turn.
             logger.error("llm.unavailable", error_type=type(exc).__name__)
             raise ServiceUnavailableError(
                 "The assistant is temporarily busy. Please try again shortly."
             ) from exc
+        except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
+            # Revoked/rotated key or a model the project can't use. Not the
+            # customer's fault and not retryable by them, but for them it's an outage.
+            logger.critical("llm.misconfigured", error_type=type(exc).__name__)
+            raise ServiceUnavailableError(
+                "The assistant is temporarily unavailable. Please try again later."
+            ) from exc
+        finally:
+            await self._record_usage(thread_id, tracker)
 
     def _config(self, thread_id: str) -> RunnableConfig:
         structlog.contextvars.bind_contextvars(thread_id=thread_id)
@@ -181,15 +282,19 @@ class AgentService:
         snapshot = await self._graph.aget_state(config)
         values = snapshot.values
         pending = _pending_interrupt(snapshot)
-        if pending is not None:
-            reply = pending.payload.get("customer_message")
-        else:
-            reply = _last_ai_text(values.get("messages", []))
+        last_ai = None if pending else _last_ai_message(values.get("messages", []))
+        reply = (
+            pending.payload.get("customer_message")
+            if pending
+            else (last_ai.text if last_ai else None)
+        )
         intent = values.get("intent")
         return TurnResult(
             thread_id=thread_id,
             status=_status(pending),
             reply=reply,
+            reply_message_id=last_ai.id if last_ai else None,
+            cached=bool(values.get("cache_hit")),
             intent=str(intent) if intent else None,
             ticket_id=values.get("ticket_id"),
             pending=pending,
@@ -208,10 +313,10 @@ def _status(pending: PendingAction | None) -> TurnStatus:
     return TurnStatus.COMPLETED if pending is None else _STATUS_BY_INTERRUPT[pending.type]
 
 
-def _last_ai_text(messages: list[Any]) -> str | None:
+def _last_ai_message(messages: list[Any]) -> AIMessage | None:
     for message in reversed(messages):
         if isinstance(message, AIMessage) and not message.tool_calls and message.text:
-            return message.text
+            return message
         if isinstance(message, HumanMessage):
             break
     return None
@@ -221,10 +326,10 @@ def _message_views(messages: list[Any]) -> list[MessageView]:
     views: list[MessageView] = []
     for m in messages:
         if isinstance(m, HumanMessage):
-            views.append(MessageView(role="customer", content=m.text))
+            views.append(MessageView(message_id=m.id, role="customer", content=m.text))
         elif isinstance(m, AIMessage) and not m.tool_calls and m.text:
             role = "human_agent" if m.name == "human_agent" else "assistant"
-            views.append(MessageView(role=role, content=m.text))
+            views.append(MessageView(message_id=m.id, role=role, content=m.text))
     return views
 
 

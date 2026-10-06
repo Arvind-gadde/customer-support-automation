@@ -1,6 +1,6 @@
 """Deterministic stand-ins for every LLM call.
 
-Because nodes depend on Runnables (not AzureChatOpenAI), a fake is just a
+Because nodes depend on Runnables (not ChatOpenAI), a fake is just a
 RunnableLambda. No mocking/patching, no network, millisecond-fast tests.
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda
 
 from support_agent.agent.dependencies import AgentDependencies
 from support_agent.agent.schemas import (
@@ -28,7 +28,10 @@ from support_agent.agent.tools import build_tools
 from support_agent.core.config import Settings
 from support_agent.integrations.orders import InMemoryOrderService
 from support_agent.integrations.ticketing import InMemoryTicketingClient
+from support_agent.llm.moderation import ModerationResult, Moderator, NoopModerator
+from support_agent.rag.reranker import PassthroughReranker, Reranker
 from support_agent.rag.retriever import Retriever
+from support_agent.rag.semantic_cache import InMemorySemanticCache, SemanticCache
 
 Fn = Callable[[list[BaseMessage]], Any]
 _ORDER = re.compile(r"ORD-\d+", re.IGNORECASE)
@@ -78,6 +81,11 @@ def scripted_account_agent(messages: list[BaseMessage]) -> AIMessage:
     )
 
 
+def _runnable(fn: Any) -> Runnable[Any, Any]:
+    """Accept a plain function OR a real Runnable (e.g. a fake chat model that fires callbacks)."""
+    return fn if isinstance(fn, Runnable) else RunnableLambda(fn)
+
+
 def make_deps(
     settings: Settings,
     *,
@@ -90,6 +98,9 @@ def make_deps(
     groundedness: Fn | None = None,
     answerer: Fn | None = None,
     account_agent: Fn = scripted_account_agent,
+    reranker: Reranker | None = None,
+    cache: SemanticCache | None = None,
+    moderator: Moderator | None = None,
 ) -> AgentDependencies:
     orders = orders or InMemoryOrderService()
     return AgentDependencies(
@@ -100,14 +111,31 @@ def make_deps(
         groundedness=RunnableLambda(
             groundedness or (lambda m: GroundednessVerdict(grounded=True, unsupported_claims=[]))
         ),
-        answerer=RunnableLambda(
+        answerer=_runnable(
             answerer or (lambda m: AIMessage(content="Returns are accepted within 10 days."))
         ),
         account_agent=RunnableLambda(account_agent),
         tools=build_tools(orders),
         retriever=retriever,
+        reranker=reranker or PassthroughReranker(),
+        cache=cache if cache is not None else InMemorySemanticCache(namespace="test"),
+        moderator=moderator or NoopModerator(),
         ticketing=ticketing or InMemoryTicketingClient(),
     )
+
+
+class KeywordModerator:
+    """Flags any text containing one of the given words."""
+
+    def __init__(self, *words: str) -> None:
+        self.words = words
+        self.checked: list[str] = []
+
+    async def check(self, text: str) -> ModerationResult:
+        self.checked.append(text)
+        if any(w in text.lower() for w in self.words):
+            return ModerationResult(flagged=True, categories=["harassment"])
+        return ModerationResult(flagged=False)
 
 
 class HashEmbeddings(Embeddings):

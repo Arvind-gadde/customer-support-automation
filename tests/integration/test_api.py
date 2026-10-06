@@ -106,3 +106,25 @@ async def test_stream_validation_error_is_a_real_status_code(client) -> None:
         headers=CLIENT,
     )
     assert response.status_code == 403
+
+
+async def test_feedback_endpoint(client) -> None:
+    turn = (
+        await client.post(
+            "/v1/chat",
+            json={"customer_id": "cust_123", "message": "What is the return window?"},
+            headers=CLIENT,
+        )
+    ).json()
+    body = {"customer_id": "cust_123", "message_id": turn["reply_message_id"], "rating": "up"}
+
+    ok = await client.post(f"/v1/threads/{turn['thread_id']}/feedback", json=body, headers=CLIENT)
+    assert ok.status_code == 200
+    assert ok.json()["rating"] == "up"
+
+    bad = await client.post(
+        f"/v1/threads/{turn['thread_id']}/feedback",
+        json={**body, "rating": "meh"},
+        headers=CLIENT,
+    )
+    assert bad.status_code == 422

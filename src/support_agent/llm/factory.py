@@ -1,10 +1,12 @@
-"""Model construction. The ONLY module that knows we're on Azure OpenAI.
+"""Model construction. The ONLY module that knows the provider is OpenAI.
 
-- Auth: Entra ID token provider by default (managed identity in Container Apps,
-  `az login` locally). API keys are supported but discouraged; infra disables
-  key auth on the OpenAI resource entirely.
-- Resilience: SDK-level retries with backoff, plus an optional fallback
-  deployment (e.g. a second region or a different model) for 429/5xx storms.
+Swapping providers (Azure OpenAI, an internal gateway, another vendor with an
+OpenAI-compatible API) means changing this file and nothing else.
+
+Resilience, in order:
+  1. SDK retries with exponential backoff (429 / 5xx / timeouts).
+  2. Optional fallback model, used when the primary still fails.
+  3. The service layer turns what's left into a retryable 503.
 """
 
 from __future__ import annotations
@@ -12,12 +14,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import BaseModel
 
 from support_agent.agent.dependencies import AgentDependencies, Messages
@@ -29,44 +30,43 @@ from support_agent.agent.schemas import (
 )
 from support_agent.core.config import Settings
 from support_agent.integrations.ticketing import TicketingClient
+from support_agent.llm.moderation import Moderator
+from support_agent.rag.reranker import Reranker
 from support_agent.rag.retriever import Retriever
+from support_agent.rag.semantic_cache import SemanticCache
 
-_COGNITIVE_SCOPE = "https://cognitiveservices.azure.com/.default"
 S = TypeVar("S", bound=BaseModel)
 
 
-def _auth_kwargs(settings: Settings) -> dict[str, Any]:
-    if settings.azure_openai_api_key is not None:
-        return {"api_key": settings.azure_openai_api_key}
-    return {
-        "azure_ad_token_provider": get_bearer_token_provider(
-            DefaultAzureCredential(), _COGNITIVE_SCOPE
-        )
-    }
-
-
-def build_chat_model(settings: Settings, deployment: str) -> AzureChatOpenAI:
+def _client_kwargs(settings: Settings) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
-        "azure_endpoint": settings.azure_openai_endpoint,
-        "azure_deployment": deployment,
-        "api_version": settings.azure_openai_api_version,
-        "timeout": settings.llm_timeout_seconds,
         "max_retries": settings.llm_max_retries,
-        **_auth_kwargs(settings),
+        "timeout": settings.llm_timeout_seconds,
+    }
+    if settings.openai_api_key is not None:
+        kwargs["api_key"] = settings.openai_api_key
+    if settings.openai_base_url:
+        kwargs["base_url"] = settings.openai_base_url
+    return kwargs
+
+
+def build_chat_model(settings: Settings, model: str) -> ChatOpenAI:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        # Token usage on streamed responses too, so cost tracking sees every call.
+        "stream_usage": True,
+        **_client_kwargs(settings),
     }
     if settings.llm_temperature is not None:
         kwargs["temperature"] = settings.llm_temperature
-    return AzureChatOpenAI(**kwargs)
+    return ChatOpenAI(**kwargs)
 
 
-def build_embeddings(settings: Settings) -> AzureOpenAIEmbeddings:
-    return AzureOpenAIEmbeddings(
-        azure_endpoint=settings.azure_openai_endpoint,
-        deployment=settings.azure_openai_embedding_deployment,
-        openai_api_version=settings.azure_openai_api_version,
+def build_embeddings(settings: Settings) -> OpenAIEmbeddings:
+    return OpenAIEmbeddings(
+        model=settings.openai_embedding_model,
         dimensions=settings.embedding_dimensions,
-        max_retries=settings.llm_max_retries,
-        **_auth_kwargs(settings),
+        **_client_kwargs(settings),
     )
 
 
@@ -84,12 +84,15 @@ def build_dependencies(
     *,
     tools: list[BaseTool],
     retriever: Retriever,
+    reranker: Reranker,
+    cache: SemanticCache,
+    moderator: Moderator,
     ticketing: TicketingClient,
 ) -> AgentDependencies:
-    primary = build_chat_model(settings, settings.azure_openai_chat_deployment)
+    primary = build_chat_model(settings, settings.openai_chat_model)
     fallback = (
-        build_chat_model(settings, settings.azure_openai_fallback_deployment)
-        if settings.azure_openai_fallback_deployment
+        build_chat_model(settings, settings.openai_fallback_model)
+        if settings.openai_fallback_model
         else None
     )
 
@@ -115,5 +118,8 @@ def build_dependencies(
         account_agent=account_agent,
         tools=tools,
         retriever=retriever,
+        reranker=reranker,
+        cache=cache,
+        moderator=moderator,
         ticketing=ticketing,
     )

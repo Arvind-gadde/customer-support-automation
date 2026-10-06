@@ -2158,7 +2158,6 @@ name = "support-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "azure-identity" },
     { name = "azure-monitor-opentelemetry" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -2185,7 +2184,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "azure-identity", specifier = ">=1.26" },
     { name = "azure-monitor-opentelemetry", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.142" },
     { name = "httpx", specifier = ">=0.28" },

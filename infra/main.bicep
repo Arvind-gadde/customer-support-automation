@@ -1,7 +1,7 @@
 // =============================================================================
 // Support Agent - Azure infrastructure
 //
-//   Container Apps  ──(managed identity)──▶ Azure OpenAI   (key auth DISABLED)
+//   Container Apps  ──(HTTPS, key from Key Vault)──▶ OpenAI API
 //        │   └──────(managed identity)──▶ Key Vault       (secrets as refs)
 //        │   └──────(managed identity)──▶ ACR             (AcrPull)
 //        └──▶ PostgreSQL Flexible Server (pgvector + LangGraph checkpoints)
@@ -19,9 +19,6 @@ param environmentName string = 'dev'
 
 @description('Region for everything except Azure OpenAI.')
 param location string = resourceGroup().location
-
-@description('Region for Azure OpenAI. Model/SKU availability differs per region - check before deploying.')
-param openAiLocation string = location
 
 @minLength(3)
 @maxLength(10)
@@ -45,16 +42,16 @@ param clientApiKeys string
 @description('Comma-separated API keys for the internal staff console.')
 param staffApiKeys string
 
-param chatModelName string = 'gpt-4.1-mini'
-param chatModelVersion string = '2025-04-14'
-@description('Chat deployment capacity in thousands of tokens per minute.')
-param chatCapacity int = 50
-param embeddingModelName string = 'text-embedding-3-small'
-param embeddingModelVersion string = '1'
-param embeddingCapacity int = 50
+@secure()
+@description('OpenAI API key. Use a project-scoped key with a budget limit.')
+param openAiApiKey string
 
-@description('Optional Entra object ID of a developer/CI principal that also needs OpenAI access (for local dev + evals).')
-param developerPrincipalId string = ''
+@description('OpenAI chat model.')
+param openAiChatModel string = 'gpt-4.1-mini'
+
+@secure()
+@description('Optional Cohere key. Empty = no reranker (hybrid-search order is kept).')
+param cohereApiKey string = ''
 
 @description('Order service base URL. Required for prod (in-memory fakes are refused in production).')
 param orderServiceBaseUrl string = ''
@@ -114,23 +111,6 @@ module postgres 'modules/postgres.bicep' = {
   }
 }
 
-module openai 'modules/openai.bicep' = {
-  name: 'openai'
-  params: {
-    name: 'oai-${prefix}-${suffix}'
-    location: openAiLocation
-    tags: tags
-    chatModelName: chatModelName
-    chatModelVersion: chatModelVersion
-    chatCapacity: chatCapacity
-    embeddingModelName: embeddingModelName
-    embeddingModelVersion: embeddingModelVersion
-    embeddingCapacity: embeddingCapacity
-    userPrincipalIds: empty(developerPrincipalId) ? [] : [developerPrincipalId]
-    servicePrincipalId: identity.outputs.principalId
-  }
-}
-
 module keyVault 'modules/keyvault.bicep' = {
   name: 'keyvault'
   params: {
@@ -139,11 +119,15 @@ module keyVault 'modules/keyvault.bicep' = {
     tags: tags
     isProd: isProd
     readerPrincipalId: identity.outputs.principalId
-    secrets: {
-      'database-url': 'postgresql://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgres.outputs.fqdn}:5432/${databaseName}?sslmode=require'
-      'client-api-keys': clientApiKeys
-      'staff-api-keys': staffApiKeys
-    }
+    secrets: union(
+      {
+        'database-url': 'postgresql://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgres.outputs.fqdn}:5432/${databaseName}?sslmode=require'
+        'client-api-keys': clientApiKeys
+        'staff-api-keys': staffApiKeys
+        'openai-api-key': openAiApiKey
+      },
+      empty(cohereApiKey) ? {} : { 'cohere-api-key': cohereApiKey }
+    )
   }
 }
 
@@ -157,16 +141,23 @@ module app 'modules/containerapp.bicep' = if (deployApp) {
     isProd: isProd
     image: containerImage
     identityId: identity.outputs.id
-    identityClientId: identity.outputs.clientId
     registryServer: registry.outputs.loginServer
     logAnalyticsWorkspaceName: monitoring.outputs.workspaceName
     keyVaultUri: keyVault.outputs.uri
+    keyVaultSecrets: concat(
+      [
+        { name: 'database-url', env: 'DATABASE_URL' }
+        { name: 'client-api-keys', env: 'CLIENT_API_KEYS' }
+        { name: 'staff-api-keys', env: 'STAFF_API_KEYS' }
+        { name: 'openai-api-key', env: 'OPENAI_API_KEY' }
+      ],
+      empty(cohereApiKey) ? [] : [{ name: 'cohere-api-key', env: 'COHERE_API_KEY' }]
+    )
     env: [
       { name: 'ENVIRONMENT', value: isProd ? 'production' : 'staging' }
       { name: 'LOG_JSON', value: 'true' }
-      { name: 'AZURE_OPENAI_ENDPOINT', value: openai.outputs.endpoint }
-      { name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', value: openai.outputs.chatDeployment }
-      { name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT', value: openai.outputs.embeddingDeployment }
+      { name: 'OPENAI_CHAT_MODEL', value: openAiChatModel }
+      { name: 'RERANKER_BACKEND', value: empty(cohereApiKey) ? 'none' : 'cohere' }
       { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: monitoring.outputs.appInsightsConnectionString }
       { name: 'ORDER_SERVICE_BASE_URL', value: orderServiceBaseUrl }
       { name: 'TICKETING_BASE_URL', value: ticketingBaseUrl }
@@ -179,6 +170,5 @@ output acrName string = registry.outputs.name
 output acrLoginServer string = registry.outputs.loginServer
 output containerAppName string = deployApp ? app!.outputs.name : ''
 output appUrl string = deployApp ? 'https://${app!.outputs.fqdn}' : ''
-output openAiEndpoint string = openai.outputs.endpoint
 output keyVaultName string = keyVault.outputs.name
 output postgresFqdn string = postgres.outputs.fqdn

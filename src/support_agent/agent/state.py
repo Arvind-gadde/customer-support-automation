@@ -29,6 +29,7 @@ class HandoffReason(StrEnum):
     UNGROUNDED_ANSWER = "ungrounded_answer"
     TOOL_ITERATION_LIMIT = "tool_iteration_limit"
     CONTENT_FILTERED = "content_filtered"
+    OUTPUT_FLAGGED = "output_flagged"
 
 
 class RetrievedDoc(TypedDict):
@@ -59,6 +60,9 @@ class AgentState(TypedDict):
     guardrail_violation: NotRequired[str | None]
     handoff_reason: NotRequired[str | None]
     ticket_id: NotRequired[str | None]
+    cacheable: NotRequired[bool]  # first-turn FAQ question: safe to look up / store
+    cache_hit: NotRequired[bool]
+    output_modified: NotRequired[bool]  # output guard changed the answer
 
 
 def new_turn(message: str, customer_id: str) -> dict[str, Any]:
@@ -75,4 +79,7 @@ def new_turn(message: str, customer_id: str) -> dict[str, Any]:
         "guardrail_violation": None,
         "handoff_reason": None,
         "ticket_id": None,
+        "cacheable": False,
+        "cache_hit": False,
+        "output_modified": False,
     }

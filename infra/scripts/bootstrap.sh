@@ -5,13 +5,16 @@
 # pass existing ones via env vars (PG_PASSWORD, CLIENT_API_KEYS, STAFF_API_KEYS)
 # if the environment already exists.
 #
+#   export OPENAI_API_KEY=sk-proj-...        # required
+#   export COHERE_API_KEY=...                # optional: enables the reranker
 #   RG=rg-support-agent-dev LOCATION=centralindia ./infra/scripts/bootstrap.sh
 # =============================================================================
 set -euo pipefail
 
 : "${RG:?Set RG (resource group name)}"
+: "${OPENAI_API_KEY:?Set OPENAI_API_KEY (a project-scoped key with a budget limit)}"
 LOCATION="${LOCATION:-centralindia}"
-OPENAI_LOCATION="${OPENAI_LOCATION:-$LOCATION}"
+COHERE_API_KEY="${COHERE_API_KEY:-}"
 ENV_NAME="${ENV_NAME:-dev}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
@@ -19,17 +22,16 @@ gen() { openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
 PG_PASSWORD="${PG_PASSWORD:-$(gen 32)}"
 CLIENT_API_KEYS="${CLIENT_API_KEYS:-ck_$(gen 40)}"
 STAFF_API_KEYS="${STAFF_API_KEYS:-sk_$(gen 40)}"
-DEV_PRINCIPAL_ID="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || echo '')"
 
 deploy() {
   az deployment group create \
     --resource-group "$RG" \
     --name "support-agent-$(date +%Y%m%d%H%M%S)" \
     --template-file "$ROOT/infra/main.bicep" \
-    --parameters environmentName="$ENV_NAME" openAiLocation="$OPENAI_LOCATION" \
+    --parameters environmentName="$ENV_NAME" \
                  postgresAdminPassword="$PG_PASSWORD" \
                  clientApiKeys="$CLIENT_API_KEYS" staffApiKeys="$STAFF_API_KEYS" \
-                 developerPrincipalId="$DEV_PRINCIPAL_ID" "$@" \
+                 openAiApiKey="$OPENAI_API_KEY" cohereApiKey="$COHERE_API_KEY" "$@" \
     --query properties.outputs -o json
 }
 
@@ -52,7 +54,6 @@ cat <<SUMMARY
 ============================================================================
  Deployed.
    App URL        : $(echo "$OUTPUTS" | jq -r .appUrl.value)
-   OpenAI endpoint: $(echo "$OUTPUTS" | jq -r .openAiEndpoint.value)
    Postgres       : $(echo "$OUTPUTS" | jq -r .postgresFqdn.value)
    Key Vault      : $(echo "$OUTPUTS" | jq -r .keyVaultName.value)
 

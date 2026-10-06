@@ -64,8 +64,7 @@ jobs:
         run: |
           docker run -d --name app -p 8000:8000 \
             -e CHECKPOINTER_BACKEND=memory -e RETRIEVER_BACKEND=memory \
-            -e AZURE_OPENAI_ENDPOINT=https://example.openai.azure.com/ \
-            -e AZURE_OPENAI_API_KEY=unused support-agent:ci
+            -e OPENAI_API_KEY=sk-ci-unused-no-calls-made support-agent:ci
           for i in $(seq 1 20); do curl -fsS localhost:8000/health/live && exit 0; sleep 1; done
           docker logs app; exit 1
       - name: Vulnerability scan

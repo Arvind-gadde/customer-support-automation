@@ -6,7 +6,7 @@ prompt change. Changing a prompt => bump the version => run `make evals`.
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-10-05.1"
+PROMPT_VERSION = "2026-10-06.1"
 
 COMPANY = "Acme Retail"
 
@@ -75,3 +75,19 @@ APPROVAL_PENDING_REPLY = (
     "I've requested approval for this refund from our team. "
     "You'll get an update here as soon as it's reviewed."
 )
+
+OUTPUT_BLOCKED_REPLY = (
+    "Sorry, I couldn't put together a reply I'm confident sharing. "
+    "I'm passing this to our support team."
+)
+
+# Checked by the output guard: no answer may quote these.
+SYSTEM_PROMPTS = [
+    ROUTER_SYSTEM,
+    GRADER_SYSTEM,
+    REWRITE_SYSTEM,
+    ANSWER_SYSTEM.split("<context>")[0],  # the instructions, not the retrieved KB text
+    GROUNDEDNESS_SYSTEM,
+    ACCOUNT_AGENT_SYSTEM,
+    SMALLTALK_SYSTEM,
+]

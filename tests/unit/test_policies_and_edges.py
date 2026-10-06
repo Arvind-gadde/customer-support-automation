@@ -15,7 +15,7 @@ def test_refund_approval_threshold() -> None:
 
 
 def test_after_classify_routes_every_intent() -> None:
-    assert edges.after_classify({"intent": Intent.FAQ}) == "retrieve"
+    assert edges.after_classify({"intent": Intent.FAQ}) == "check_cache"
     assert edges.after_classify({"intent": Intent.ACCOUNT}) == "account_agent"
     assert edges.after_classify({"intent": Intent.SMALLTALK}) == "smalltalk_reply"
     assert edges.after_classify({"intent": Intent.HUMAN}) == "create_ticket"
@@ -35,4 +35,22 @@ def test_after_grade() -> None:
 def test_after_account_agent() -> None:
     with_tools = AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "1"}])
     assert edges.after_account_agent({"messages": [with_tools]}) == "review_tool_calls"
-    assert edges.after_account_agent({"messages": [AIMessage(content="done")]}) == END
+    assert edges.after_account_agent({"messages": [AIMessage(content="done")]}) == "guard_output"
+
+
+def test_after_cache() -> None:
+    assert edges.after_cache({"cache_hit": True}) == "guard_output"
+    assert edges.after_cache({"cache_hit": False}) == "retrieve"
+
+
+def test_after_guard_output_stores_only_clean_first_turn_faq_answers() -> None:
+    doc = {"id": "1", "source": "s", "title": "t", "content": "c", "score": 1.0}
+    clean = {"intent": "faq", "cacheable": True, "documents": [doc]}
+    assert edges.after_guard_output(clean) == "store_cache"
+    assert edges.after_guard_output({**clean, "cache_hit": True}) == END  # already cached
+    assert edges.after_guard_output({**clean, "output_modified": True}) == END  # redacted
+    assert edges.after_guard_output({**clean, "cacheable": False}) == END  # follow-up turn
+    assert edges.after_guard_output({**clean, "intent": "account"}) == END  # personal data
+    assert (
+        edges.after_guard_output({**clean, "handoff_reason": "output_flagged"}) == "create_ticket"
+    )

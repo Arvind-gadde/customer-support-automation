@@ -8,7 +8,11 @@ graph TD;
 	guard_input(guard_input)
 	blocked_reply(blocked_reply)
 	classify_intent(classify_intent)
+	guard_output(guard_output)
+	check_cache(check_cache)
+	store_cache(store_cache)
 	retrieve(retrieve)
+	rerank(rerank)
 	grade_documents(grade_documents)
 	rewrite_query(rewrite_query)
 	generate_answer(generate_answer)
@@ -21,12 +25,14 @@ graph TD;
 	await_human(await_human)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> guard_input;
-	account_agent -.-> __end__;
 	account_agent -.-> create_ticket;
+	account_agent -.-> guard_output;
 	account_agent -.-> review_tool_calls;
+	check_cache -.-> guard_output;
+	check_cache -.-> retrieve;
 	classify_intent -.-> account_agent;
+	classify_intent -.-> check_cache;
 	classify_intent -.-> create_ticket;
-	classify_intent -.-> retrieve;
 	classify_intent -.-> smalltalk_reply;
 	create_ticket --> await_human;
 	generate_answer --> verify_answer;
@@ -35,16 +41,21 @@ graph TD;
 	grade_documents -.-> rewrite_query;
 	guard_input -.-> blocked_reply;
 	guard_input -.-> classify_intent;
-	retrieve --> grade_documents;
+	guard_output -.-> __end__;
+	guard_output -.-> create_ticket;
+	guard_output -.-> store_cache;
+	rerank --> grade_documents;
+	retrieve --> rerank;
 	review_tool_calls -.-> account_agent;
 	review_tool_calls -.-> tools;
 	rewrite_query --> retrieve;
+	smalltalk_reply --> guard_output;
 	tools --> account_agent;
-	verify_answer -.-> __end__;
 	verify_answer -.-> create_ticket;
+	verify_answer -.-> guard_output;
 	await_human --> __end__;
 	blocked_reply --> __end__;
-	smalltalk_reply --> __end__;
+	store_cache --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc

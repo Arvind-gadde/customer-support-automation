@@ -1,6 +1,6 @@
 """Corrective RAG (CRAG) pipeline.
 
-retrieve -> grade -> (rewrite -> retrieve)* -> generate -> verify
+retrieve -> rerank -> grade -> (rewrite -> retrieve)* -> generate -> verify
 
 1. Grading filters retrieved chunks with an LLM judge, so irrelevant context
    never reaches the answer prompt (the #1 cause of confident wrong answers).
@@ -25,6 +25,7 @@ from support_agent.agent.prompts import (
     SMALLTALK_SYSTEM,
 )
 from support_agent.agent.state import AgentState, HandoffReason, RetrievedDoc
+from support_agent.core.config import RerankerBackend
 from support_agent.core.logging import get_logger
 from support_agent.core.telemetry import set_span_attributes, traced_node
 from support_agent.llm.errors import is_content_filter_error
@@ -40,11 +41,19 @@ def format_docs(docs: list[RetrievedDoc]) -> str:
 
 
 def make_retrieve(deps: AgentDependencies):  # type: ignore[no-untyped-def]
+    settings = deps.settings
+    # With a reranker, retrieve wide (recall) and let the reranker cut (precision).
+    candidates = (
+        settings.rerank_candidates
+        if settings.reranker_backend != RerankerBackend.NONE
+        else settings.retrieval_top_k
+    )
+
     @traced_node("retrieve")
     async def retrieve(state: AgentState) -> dict[str, Any]:
         query = state.get("query") or last_human_text(state["messages"])
         try:
-            docs = await deps.retriever.search(query, deps.settings.retrieval_top_k)
+            docs = await deps.retriever.search(query, candidates)
         except Exception:
             # Degrade, don't crash: an empty result routes to rewrite/handoff.
             logger.exception("retrieval.failed")
@@ -53,6 +62,20 @@ def make_retrieve(deps: AgentDependencies):  # type: ignore[no-untyped-def]
         return {"documents": docs}
 
     return retrieve
+
+
+def make_rerank(deps: AgentDependencies):  # type: ignore[no-untyped-def]
+    top_k = deps.settings.retrieval_top_k
+
+    @traced_node("rerank")
+    async def rerank(state: AgentState) -> dict[str, Any]:
+        docs = state.get("documents", [])
+        query = state.get("query") or last_human_text(state["messages"])
+        ranked = await deps.reranker.rerank(query, docs, top_k)
+        set_span_attributes(**{"rag.reranked": len(ranked)})
+        return {"documents": ranked}
+
+    return rerank
 
 
 def make_grade_documents(deps: AgentDependencies):  # type: ignore[no-untyped-def]

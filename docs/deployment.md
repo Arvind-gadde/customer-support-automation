@@ -5,27 +5,26 @@
 | Resource | Purpose | Dev SKU | Prod SKU |
 |---|---|---|---|
 | Container Apps env + app | Runs the API | 0.5 vCPU / 1 GiB, 1–3 replicas | 1 vCPU / 2 GiB, 2–10 replicas |
-| Azure OpenAI | Chat + embeddings, **key auth disabled** | GlobalStandard | GlobalStandard |
-| PostgreSQL Flexible Server 16 | Checkpoints + pgvector | Burstable B1ms | GP D2ds_v5, zone-redundant HA |
-| Key Vault (RBAC) | DB URL + API keys | standard | standard + purge protection |
+| PostgreSQL Flexible Server 16 | Checkpoints, pgvector KB, semantic cache, usage, feedback | Burstable B1ms | GP D2ds_v5, zone-redundant HA |
+| Key Vault (RBAC) | DB URL, API keys, OpenAI key, optional Cohere key | standard | standard + purge protection |
 | Container Registry | Images (admin user off) | Basic | Standard |
 | Log Analytics + App Insights | Logs, traces, metrics | 30-day retention | 90-day retention |
-| User-assigned managed identity | AcrPull, Key Vault Secrets User, OpenAI User | | |
+| User-assigned managed identity | AcrPull, Key Vault Secrets User | | |
+
+Models are called on the **OpenAI API**, outside Azure. No Azure OpenAI resource is created.
 
 ## Prerequisites
 
 - Azure CLI (`az login`), `jq`, `openssl`
-- **Owner** or **User Access Administrator** + **Contributor** on the subscription or resource group, because the template creates role assignments
-- Model quota: check that `gpt-4.1-mini` and `text-embedding-3-small` are available with **GlobalStandard** in your OpenAI region:
-  ```bash
-  az cognitiveservices model list -l centralindia \
-    --query "[?model.name=='gpt-4.1-mini'].{v:model.version, skus:model.skus[].name}" -o table
-  ```
-  If they aren't available there, set `OPENAI_LOCATION` (e.g. `swedencentral`, `eastus2`) and keep everything else in India. Note this is a **data-residency decision**: prompts would be processed in that region.
+- **Owner** or **User Access Administrator** + **Contributor** on the subscription or resource group (the template creates role assignments)
+- An **OpenAI project API key** (`sk-proj-...`). In the OpenAI dashboard, create a project for this service, set a **monthly budget**, and limit the key to the models you use. Use a separate project and key for evals.
+- Optional: a **Cohere API key** to enable reranking.
 
 ## 1. Bootstrap (once per environment)
 
 ```bash
+export OPENAI_API_KEY=sk-proj-...
+export COHERE_API_KEY=...        # optional
 RG=rg-support-agent-dev LOCATION=centralindia ENV_NAME=dev ./infra/scripts/bootstrap.sh
 ```
 
@@ -37,7 +36,7 @@ The script runs three phases. A Container App can't be created before its image 
 
 It prints the generated `CLIENT_API_KEYS` and `STAFF_API_KEYS` **once**. Store them in your password manager.
 
-> Re-running `bootstrap.sh` generates **new** secrets unless you export `PG_PASSWORD`, `CLIENT_API_KEYS` and `STAFF_API_KEYS` first. Day-to-day deploys use the GitHub workflow, not this script.
+> Re-running `bootstrap.sh` generates **new** service secrets unless you export `PG_PASSWORD`, `CLIENT_API_KEYS` and `STAFF_API_KEYS` first. Day-to-day deploys use the GitHub workflow, not this script.
 
 ## 2. Ingest the knowledge base <a id="ingest"></a>
 
@@ -50,13 +49,13 @@ az postgres flexible-server firewall-rule create -g $RG -n <postgres-name> \
   --rule-name ingest-$USER --start-ip-address $MYIP --end-ip-address $MYIP
 
 export DATABASE_URL="$(az keyvault secret show --vault-name <kv-name> -n database-url --query value -o tsv)"
-export AZURE_OPENAI_ENDPOINT=<openAiEndpoint output>
-make ingest     # uses your `az login` identity (bootstrap granted it OpenAI User)
+export OPENAI_API_KEY=sk-proj-...   # embeddings for the KB
+make ingest
 
 az postgres flexible-server firewall-rule delete -g $RG -n <postgres-name> --rule-name ingest-$USER --yes
 ```
 
-Ingestion is idempotent and incremental: unchanged chunks are not re-embedded, and deleted ones are removed. A production setup would run it as a **Container Apps Job** triggered when `data/knowledge_base/**` changes.
+Ingestion is idempotent and incremental: unchanged chunks are not re-embedded, and deleted ones are removed. Any change also **wipes the semantic cache**, because cached answers were grounded in the old content. A production setup would run it as a **Container Apps Job** triggered when `data/knowledge_base/**` changes.
 
 ## 3. Wire up CI/CD (GitHub Actions with OIDC, no stored secrets)
 
@@ -75,7 +74,7 @@ az role assignment create --assignee $APP_ID --role AcrPush --scope $RG_ID
 
 Set these GitHub **repository variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `ACR_NAME`, `CONTAINER_APP_NAME`. Create a `production` environment in GitHub, and add required reviewers there if you want a manual gate.
 
-For nightly evals, also add `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_CHAT_DEPLOYMENT`, a federated credential for `environment:evals`, and the **Cognitive Services OpenAI User** role on the OpenAI account.
+For nightly evals, add a GitHub **secret** `OPENAI_EVALS_API_KEY` (a separate, budget-capped project key) in an `evals` environment, and optionally a variable `OPENAI_CHAT_MODEL`.
 
 ## 4. Verify
 
@@ -91,4 +90,5 @@ curl -s $URL/v1/chat -H "X-API-Key: $CLIENT_KEY" -H 'content-type: application/j
 - `ENVIRONMENT=production` **refuses to boot** with in-memory integrations. Pass `orderServiceBaseUrl` and `ticketingBaseUrl` as deployment parameters.
 - Swagger/OpenAPI is disabled in production.
 - Move to private networking (see README, "Deliberately out of scope").
-- Set a `AZURE_OPENAI_FALLBACK_DEPLOYMENT` (a second deployment, ideally in another region) for throttling resilience.
+- Set `OPENAI_FALLBACK_MODEL` (e.g. `gpt-4.1`) for throttling resilience on the primary model.
+- Check **data residency**: prompts are processed by OpenAI outside your Azure region (ADR 0006).
